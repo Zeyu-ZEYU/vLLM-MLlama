@@ -1015,7 +1015,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         )
         self.sampler = Sampler()
 
-        self.in_service = False
         self.in_service_checker = None
 
     def compute_logits(
