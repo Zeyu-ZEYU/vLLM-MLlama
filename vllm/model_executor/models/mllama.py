@@ -60,6 +60,29 @@ MLLAMA_IMAGE_TOKEN_ID = 128256
 MLLAMA_IMAGE_TOKEN = "<|image|>"
 
 
+import logging
+import os
+
+
+class Logger(object):
+    def __init__(self, job_name, file_path, log_level=logging.INFO, mode="w"):
+        self.__logger = logging.getLogger(job_name)
+        self.__logger.setLevel(log_level)
+        self.__fh = logging.FileHandler(filename=file_path, mode=mode)
+        self.__formatter = logging.Formatter("%(asctime)s - %(name)s - %(message)s")
+        self.__fh.setFormatter(self.__formatter)
+        self.__logger.addHandler(self.__fh)
+
+    @property
+    def logger(self):
+        return self.__logger
+
+
+label_logger = Logger(
+    job_name="LABELS", file_path=f"./label_time_{os.getpid()}.log"
+).logger
+
+
 import time
 
 
@@ -84,6 +107,7 @@ class _Timer:
         global in_service
         if in_service:
             torch.cuda.synchronize()
+            label_logger.info(f"|STR|{self.name}|")
             self.start = time.time()
             return self
 
@@ -92,6 +116,7 @@ class _Timer:
         if in_service:
             torch.cuda.synchronize()
             interval = 1000 * (time.time() - self.start)
+            label_logger.info(f"|END|{self.name}|")
             self.total_time += interval
             print(f"{self.name}: {interval}ms out of {self.total_time}ms.")
 
@@ -1168,6 +1193,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             flag = self.in_service_checker.recv()
             if flag is True:
                 in_service = True
+                znet.SocketMsger.tcp_connect("127.0.0.1", 55555, retry=False)
 
         with _Timer("mllama_forward"):
             if (
