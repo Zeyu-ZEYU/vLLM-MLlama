@@ -79,11 +79,32 @@ class Logger(object):
 
 
 label_logger = Logger(
-    job_name="LABELS", file_path=f"./label_time_{os.getpid()}.log"
+    job_name="LABELS",
+    file_path=f"./work/logs/label_time_{torch.cuda.current_device()}.log",
 ).logger
-
-
+gpu_logger = Logger(
+    job_name="GPU",
+    file_path=f"./work/logs/gpu_mem_{torch.cuda.current_device()}.log",
+).logger
+import threading
 import time
+
+import pynvml
+
+pynvml.nvmlInit()
+handle = pynvml.nvmlDeviceGetHandleByIndex(int(0))
+total_gpu_mem = pynvml.nvmlDeviceGetMemoryInfo(handle).total
+
+
+def gpu_log_thread():
+    while True:
+        gpu_mem = torch.cuda.memory_allocated()
+        mem_usage = (gpu_mem / total_gpu_mem) * 100
+        gpu_logger.info(f"{mem_usage}")
+        time.sleep(0.02)
+
+
+gpu_log_thread_handler = threading.Thread(target=gpu_log_thread)
 
 
 def _singleton_timer(cls):
@@ -1194,6 +1215,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             if flag is True:
                 in_service = True
                 znet.SocketMsger.tcp_connect("127.0.0.1", 55555, retry=False)
+                gpu_log_thread_handler.start()
 
         with _Timer("mllama_forward"):
             if (
