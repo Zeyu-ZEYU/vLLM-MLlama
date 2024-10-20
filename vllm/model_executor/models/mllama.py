@@ -86,6 +86,14 @@ gpu_logger = Logger(
     job_name="GPU",
     file_path=f"./work/logs/gpu_mem_{torch.cuda.current_device()}.log",
 ).logger
+current_device = torch.cuda.current_device()
+if current_device == 0:
+    latency_log = Logger(
+        job_name="LATENCY",
+        file_path=f"./work/logs/latency_{current_device}.log",
+    ).logger
+else:
+    latency_log = None
 import threading
 import time
 
@@ -139,7 +147,11 @@ class _Timer:
             interval = 1000 * (time.time() - self.start)
             label_logger.info(f"|END|{self.name}|")
             self.total_time += interval
-            print(f"{self.name}: {interval}ms out of {self.total_time}ms.")
+            if latency_log is not None:
+                print(f"{self.name}: {interval}ms out of {self.total_time}ms.")
+                latency_log.info(
+                    f"{self.name}: {interval}ms out of {self.total_time}ms."
+                )
 
     def reset(self):
         self.total_time = 0
@@ -428,28 +440,31 @@ class MllamaVisionSdpaAttention(nn.Module):
         hidden_state: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_state)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(
-            q.shape[0], q.shape[1], self.num_local_heads, self.head_dim
-        ).transpose(1, 2)
-        k = k.view(
-            k.shape[0], k.shape[1], self.num_local_heads, self.head_dim
-        ).transpose(1, 2)
-        v = v.view(
-            v.shape[0], v.shape[1], self.num_local_heads, self.head_dim
-        ).transpose(1, 2)
+        with _Timer("vision_attn_qkv"):
+            qkv, _ = self.qkv_proj(hidden_state)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q = q.view(
+                q.shape[0], q.shape[1], self.num_local_heads, self.head_dim
+            ).transpose(1, 2)
+            k = k.view(
+                k.shape[0], k.shape[1], self.num_local_heads, self.head_dim
+            ).transpose(1, 2)
+            v = v.view(
+                v.shape[0], v.shape[1], self.num_local_heads, self.head_dim
+            ).transpose(1, 2)
 
         # TODO: remove padding in image encoder
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attention_mask, dropout_p=0.0
-        )
+        with _Timer("vision_self_attn"):
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attention_mask, dropout_p=0.0
+            )
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(
-            attn_output.shape[0], attn_output.shape[1], -1
-        )
-        output, _ = self.o_proj(attn_output)
+        with _Timer("vision_post_attn_linear"):
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(
+                attn_output.shape[0], attn_output.shape[1], -1
+            )
+            output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -486,14 +501,16 @@ class MllamaVisionEncoderLayer(nn.Module):
         # Self Attention
         residual = hidden_state
         hidden_state = self.input_layernorm(hidden_state)
-        hidden_state = self.self_attn(hidden_state, attention_mask=attention_mask)
+        with _Timer("vision_encoder_attn"):
+            hidden_state = self.self_attn(hidden_state, attention_mask=attention_mask)
         gate_attn = 1 if not self.is_gated else self.gate_attn.tanh()
         hidden_state = residual + gate_attn * hidden_state
 
         # Feed forward
         residual = hidden_state
         hidden_state = self.post_attention_layernorm(hidden_state)
-        hidden_state = self.mlp(hidden_state)
+        with _Timer("vision_encoder_mlp"):
+            hidden_state = self.mlp(hidden_state)
         gate_ffn = 1 if not self.is_gated else self.gate_ffn.tanh()
         hidden_state = residual + gate_ffn * hidden_state
 
@@ -551,13 +568,14 @@ class MllamaVisionModel(nn.Module):
         self.num_patches = (self.image_size // self.patch_size) ** 2 + 1
         self.scale = config.hidden_size**-0.5
 
-        self.patch_embedding = ColumnParallelConv2dPatch(
-            in_channels=config.num_channels,
-            out_channels=self.hidden_size,
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-            bias=False,
-        )
+        with _Timer("conv_2d_patch"):
+            self.patch_embedding = ColumnParallelConv2dPatch(
+                in_channels=config.num_channels,
+                out_channels=self.hidden_size,
+                kernel_size=self.patch_size,
+                stride=self.patch_size,
+                bias=False,
+            )
 
         self.class_embedding = nn.Parameter(self.scale * torch.randn(self.hidden_size))
         self.gated_positional_embedding = MllamaPrecomputedPositionEmbedding(config)
@@ -663,10 +681,11 @@ class MllamaVisionModel(nn.Module):
         )
 
         hidden_state = hidden_state.view(batch_size * num_concurrent_media, -1, dim)
-        output = self.transformer(
-            hidden_state,
-            attention_mask=attention_mask,
-        )
+        with _Timer("vision_model_transformer"):
+            output = self.transformer(
+                hidden_state,
+                attention_mask=attention_mask,
+            )
         hidden_state, intermediate_hidden_states = output[0], output[1]
         intermediate_hidden_states = torch.stack(intermediate_hidden_states, dim=-1)
 
@@ -686,9 +705,10 @@ class MllamaVisionModel(nn.Module):
             num_tiles * (num_patches + num_padding_patches),
             dim,
         )
-        hidden_state = self.global_transformer(
-            hidden_state, attention_mask=attention_mask
-        )[0]
+        with _Timer("vision_model_global_transformer"):
+            hidden_state = self.global_transformer(
+                hidden_state, attention_mask=attention_mask
+            )[0]
         hidden_state = hidden_state.reshape(
             batch_size * num_concurrent_media,
             num_tiles,
@@ -867,20 +887,21 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
-        hidden_states = self.cross_attn(
-            hidden_states=hidden_states,
-            attention_mask=cross_attention_mask,
-            cross_attention_states=cross_attention_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
+        with _Timer("cross_attn"):
+            hidden_states = self.cross_attn(
+                hidden_states=hidden_states,
+                attention_mask=cross_attention_mask,
+                cross_attention_states=cross_attention_states,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+            )
         hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh() * hidden_states
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        with _Timer("cross_attn_mlp"):
+            hidden_states = self.mlp(hidden_states)
         hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_mlp_gate.tanh() * hidden_states
         return hidden_states
@@ -934,8 +955,9 @@ class MllamaTextModel(nn.Module):
         attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        with _Timer("language_model_vocab_emb"):
+            inputs_embeds = self.embed_tokens(input_ids)
+            hidden_states = inputs_embeds
 
         for idx, decoder_layer in enumerate(self.layers):
             if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
@@ -1002,7 +1024,8 @@ class MllamaForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
-        print(f"input_ids shape: {input_ids.shape}")
+        if latency_log:
+            latency_log.info(f"input_ids shape: {input_ids.shape}")
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -1112,7 +1135,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         if pixel_values is not None:
             assert aspect_ratio_ids is not None
             assert aspect_ratio_mask is not None
-            print(f"pixel_values shape: {pixel_values.shape}")
+            if latency_log:
+                latency_log.info(f"pixel_values shape: {pixel_values.shape}")
             max_num_images = max([len(x[0]) for x in pixel_values])
             if max_num_images == 0:
                 raise ValueError("No images provided.")
