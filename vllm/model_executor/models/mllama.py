@@ -394,6 +394,12 @@ class MllamaVisionSdpaAttention(nn.Module):
             v.shape[0], v.shape[1], self.num_local_heads, self.head_dim
         ).transpose(1, 2)
 
+        if in_service:
+            qkv_data[-1][cur_vit][-1]["hs"] = hidden_state.to("cpu").detach()
+            qkv_data[-1][cur_vit][-1]["q"] = q.to("cpu").detach()
+            qkv_data[-1][cur_vit][-1]["k"] = k.to("cpu").detach()
+            qkv_data[-1][cur_vit][-1]["v"] = v.to("cpu").detach()
+
         # TODO: remove padding in image encoder
         attn_output = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attention_mask, dropout_p=0.0
@@ -438,6 +444,8 @@ class MllamaVisionEncoderLayer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ):
         # Self Attention
+        if in_service:
+            qkv_data[-1][cur_vit].append({"hs": None, "q": None, "k": None, "v": None})
         residual = hidden_state
         hidden_state = self.input_layernorm(hidden_state)
         hidden_state = self.self_attn(hidden_state, attention_mask=attention_mask)
@@ -617,6 +625,8 @@ class MllamaVisionModel(nn.Module):
         )
 
         hidden_state = hidden_state.view(batch_size * num_concurrent_media, -1, dim)
+        global cur_vit
+        cur_vit = "vit"
         output = self.transformer(
             hidden_state,
             attention_mask=attention_mask,
@@ -640,6 +650,7 @@ class MllamaVisionModel(nn.Module):
             num_tiles * (num_patches + num_padding_patches),
             dim,
         )
+        cur_vit = "gvit"
         hidden_state = self.global_transformer(
             hidden_state, attention_mask=attention_mask
         )[0]
@@ -757,6 +768,8 @@ class MllamaTextCrossAttention(nn.Module):
         q, _, _ = qkv_dec.split(
             [self.q_local_size, self.kv_local_size, self.kv_local_size], dim=-1
         )
+        if in_service:
+            qkv_data[-1]["llm"][-1]["type"] = "cross"
         if cross_attention_states is None:
             k = None
             v = None
@@ -770,6 +783,25 @@ class MllamaTextCrossAttention(nn.Module):
             k = self.k_norm(k)
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
+
+        if in_service:
+            qkv_data[-1]["llm"][-1]["hs"] = (
+                hidden_states.to("cpu").detach() if hidden_states is not None else None
+            )
+            qkv_data[-1]["llm"][-1]["chs"] = (
+                cross_attention_states.to("cpu").detach()
+                if cross_attention_states is not None
+                else None
+            )
+            qkv_data[-1]["llm"][-1]["q"] = (
+                q.to("cpu").detach() if q is not None else None
+            )
+            qkv_data[-1]["llm"][-1]["k"] = (
+                k.to("cpu").detach() if k is not None else None
+            )
+            qkv_data[-1]["llm"][-1]["v"] = (
+                v.to("cpu").detach() if v is not None else None
+            )
 
         output = self.attn(
             q, k, v, kv_cache, attn_metadata, attn_type=AttentionType.ENCODER_DECODER
@@ -891,6 +923,18 @@ class MllamaTextModel(nn.Module):
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
+        if in_service:
+            qkv_data[-1]["llm"].append(
+                {
+                    "type": None,
+                    "hs": None,
+                    "chs": None,
+                    "q": None,
+                    "k": None,
+                    "v": None,
+                }
+            )
+
         for idx, decoder_layer in enumerate(self.layers):
             if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
                 # print("=== in cross attention decoder")
@@ -912,6 +956,8 @@ class MllamaTextModel(nn.Module):
                     kv_cache=kv_caches[idx],
                     attn_metadata=attn_metadata,
                     residual=None,
+                    qkv_data=qkv_data,
+                    in_service=in_service,
                 )
                 hidden_states = hidden_states + residual
             else:
@@ -973,6 +1019,11 @@ class MllamaForCausalLM(nn.Module):
 import vllm.zeyu_utils.net as znet
 
 in_service = False
+
+
+qkv_data = []
+cur_vit = "vit"  # or "gvit"
+qkv_req_count = 0
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -1158,6 +1209,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         **kwargs: object,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         global in_service
+        global qkv_data
+        global qkv_req_count
         if in_service is False:
             if self.in_service_checker is None:
                 self.in_service_checker = znet.SocketMsger.tcp_connect(
@@ -1168,6 +1221,25 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             flag = self.in_service_checker.recv()
             if flag is True:
                 in_service = True
+
+        if in_service:
+            if attn_metadata.num_prefills > 0:
+                qkv_req_count += 1
+            if qkv_req_count == 2:
+                import pickle
+
+                with open(
+                    f"/home/azureuser/zeyu/data/qkv_gpu{torch.cuda.current_device()}.pkl",
+                    "wb",
+                ) as f:
+                    pickle.dump(qkv_data, f)
+                qkv_data = []
+            new_iter = {
+                "vit": [],
+                "gvit": [],
+                "llm": [],
+            }
+            qkv_data.append(new_iter)
 
         with _Timer("mllama_forward"):
             if (

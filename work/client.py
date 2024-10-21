@@ -28,7 +28,7 @@ chat_completion_from_url = client.chat.completions.create(
         }
     ],
     model=model,
-    max_tokens=64,
+    max_tokens=128,
 )
 
 print(chat_completion_from_url)
