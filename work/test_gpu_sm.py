@@ -4,11 +4,13 @@ import time
 import torch
 import zeyu_utils.net as znet
 
-conn = znet.SocketMsger.tcp_connect("127.0.0.1", 38136)
-
-conn.send(os.getpid())
-
 device = torch.device("cuda:0")
+
+print(os.getpid())
+# conn = znet.SocketMsger.tcp_connect("127.0.0.1", 38136)
+
+# conn.send(os.getpid())
+
 
 # 定义张量的大小和批处理大小
 tensor_size = (4096, 4096)  # 调整大小以适应GPU内存

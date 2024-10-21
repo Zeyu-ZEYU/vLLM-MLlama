@@ -24,10 +24,9 @@ class DcgmProf:
         pid = conn.recv()
         while True:
             try:
-                dcgm_system.UpdateAllFields(True)
                 pidInfo = gpu_group.stats.GetPidInfo(pid)
+                dcgm_system.UpdateAllFields(True)
             except:
-                time.sleep(1)
                 continue
 
             ## Display some process statistics (more may be desired)
@@ -36,7 +35,10 @@ class DcgmProf:
             print("End time        : %d" % pidInfo.summary.endTime)
             print("Energy consumed : %d" % pidInfo.summary.energyConsumed)
             print("Max GPU Memory  : %d" % pidInfo.summary.maxGpuMemoryUsed)
-            print("Avg. SM util    : %d" % pidInfo.summary.smUtilization.average)
+            print(
+                "Avg. SM util    : %s"
+                % convert_value_to_string(pidInfo.summary.smUtilization.average)
+            )
             print("Avg. mem util   : %d" % pidInfo.summary.memoryUtilization.average)
             time.sleep(1)
 
@@ -65,7 +67,9 @@ def convert_value_to_string(value):
             return v.__str__()
 
 
-dcgm_handle = pydcgm.DcgmHandle(opMode=dcgm_structs.DCGM_OPERATION_MODE_MANUAL)
+dcgm_handle = pydcgm.DcgmHandle(
+    opMode=dcgm_structs.DCGM_OPERATION_MODE_MANUAL, ipAddress="127.0.0.1"
+)
 dcgm_system = dcgm_handle.GetSystem()
 gpu_group = pydcgm.DcgmGroup(
     dcgm_handle, groupName="one_gpu_group", groupType=dcgm_structs.DCGM_GROUP_EMPTY
@@ -105,7 +109,7 @@ for x in range(0, len(groupGpuIds)):
     print("\n")
 
 
-gpu_group.stats.WatchPidFields(1000000, 2, 0)
+gpu_group.stats.WatchPidFields(1000000, 3600, 0)
 
 
 DcgmProf().run()
