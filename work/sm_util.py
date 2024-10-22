@@ -16,7 +16,7 @@ class Logger(object):
         return self.__logger
 
 
-dmon_logger = Logger("DMON", "/home/azureuser/zeyu/data/mllama/logs/sm.log").logger
+dmon_logger = Logger("SM", "/home/azureuser/zeyu/data/mllama/logs/sm.log").logger
 
 
 def run_linux_command():
@@ -30,7 +30,7 @@ def run_linux_command():
             "-e",
             "1002,1003",
             "-d",
-            "100",
+            "50",
         ],  # 替换为你的命令和参数
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

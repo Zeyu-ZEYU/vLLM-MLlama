@@ -25,10 +25,12 @@ pynvml.nvmlInit()
 handle = pynvml.nvmlDeviceGetHandleByIndex(int(0))
 
 listener = znet.SocketMsger.tcp_listener("0.0.0.0", 55555)
-logger = Logger(job_name="GPU_STAT", file_path=f"./logs/gpu_cpu_util_0.log").logger
+logger = Logger(
+    job_name="GPU_STAT",
+    file_path=f"/home/azureuser/zeyu/data/mllama/logs/gpu_cpu_util_0.log",
+).logger
 
 conn, _ = listener.accept()
-
 
 recv0 = psutil.net_io_counters(pernic=True)["eth0"].bytes_recv
 time0 = time.time()
