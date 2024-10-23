@@ -238,7 +238,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 "finished_requests_ids": model_input.finished_requests_ids,
                 "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
             }
-            if self.has_seqlen_agnostic
+            if self.has_inner_state
             else {}
         )
 
