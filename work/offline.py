@@ -75,7 +75,7 @@ def main():
     llm = run_mllama()
     sampling_params = SamplingParams(temperature=0.2, max_tokens=3, stop_token_ids=None)
 
-    batch_size = 64
+    batch_size = 75
 
     time1 = time.time()
     for warmup in range(1):

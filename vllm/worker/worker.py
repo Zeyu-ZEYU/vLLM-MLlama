@@ -281,7 +281,7 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
             num_cpu_blocks = int(self.cache_config.swap_space_bytes // cache_block_size)
-        num_gpu_blocks = int(max(num_gpu_blocks, 0) * 2.5)
+        num_gpu_blocks = int(max(num_gpu_blocks, 0) * 1.45)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
         logger.info(

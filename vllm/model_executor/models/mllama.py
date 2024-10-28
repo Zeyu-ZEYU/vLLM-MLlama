@@ -435,6 +435,9 @@ class MllamaPrecomputedPositionEmbedding(nn.Module):
 
 
 # TODO: support other attention backends for attention in vision model
+import flash_attn
+
+
 class MllamaVisionSdpaAttention(nn.Module):
 
     def __init__(self, config: config_mllama.MllamaVisionConfig):
@@ -481,9 +484,7 @@ class MllamaVisionSdpaAttention(nn.Module):
 
         # TODO: remove padding in image encoder
         with _Timer("ve_sdpa"):
-            attn_output = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attention_mask, dropout_p=0.0
-            )
+            attn_output = flash_attn.flash_attn_func(q, k, v, dropout_p=0.0)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(
@@ -709,33 +710,33 @@ class MllamaVisionModel(nn.Module):
         # apply encoder
         hidden_state = self.layernorm_pre(hidden_state)
 
-        # Compute the number of tokens to pad
-        num_padding_patches = (8 - (hidden_state.shape[-2] % 8)) % 8
-        # Compute padding tuple for pad function
-        padding = (
-            0,
-            0,
-            0,
-            num_padding_patches,
-        )  # (pad_left, pad_right, pad_left for dim -2, pad_right for dim -2)
-        # Pad the tensor
-        hidden_state = F.pad(hidden_state, padding, mode="constant", value=0)
-        slice_index = -num_padding_patches if num_padding_patches > 0 else None
+        # # Compute the number of tokens to pad
+        # num_padding_patches = (8 - (hidden_state.shape[-2] % 8)) % 8
+        # # Compute padding tuple for pad function
+        # padding = (
+        #     0,
+        #     0,
+        #     0,
+        #     num_padding_patches,
+        # )  # (pad_left, pad_right, pad_left for dim -2, pad_right for dim -2)
+        # # Pad the tensor
+        # hidden_state = F.pad(hidden_state, padding, mode="constant", value=0)
+        # slice_index = -num_padding_patches if num_padding_patches > 0 else None
 
-        attention_mask = aspect_ratio_mask.reshape(
-            batch_size * num_concurrent_media, -1
-        )
-        attention_mask = _prepare_aspect_ratio_attention_mask(
-            aspect_ratio_mask=attention_mask,
-            num_patches=self.num_patches,
-            target_length=hidden_state.shape[2],
-            dtype=self.layernorm_pre.weight.dtype,
-        )
+        # attention_mask = aspect_ratio_mask.reshape(
+        #     batch_size * num_concurrent_media, -1
+        # )
+        # attention_mask = _prepare_aspect_ratio_attention_mask(
+        #     aspect_ratio_mask=attention_mask,
+        #     num_patches=self.num_patches,
+        #     target_length=hidden_state.shape[2],
+        #     dtype=self.layernorm_pre.weight.dtype,
+        # )
 
         hidden_state = hidden_state.view(batch_size * num_concurrent_media, -1, dim)
         output = self.transformer(
             hidden_state,
-            attention_mask=attention_mask,
+            # attention_mask=attention_mask,
         )
         hidden_state, intermediate_hidden_states = output[0], output[1]
         intermediate_hidden_states = torch.stack(intermediate_hidden_states, dim=-1)
@@ -745,7 +746,7 @@ class MllamaVisionModel(nn.Module):
         hidden_state = hidden_state.reshape(
             batch_size * num_concurrent_media,
             num_tiles,
-            num_patches + num_padding_patches,
+            num_patches,
             dim,
         )
         hidden_state = self.post_tile_positional_embedding(
@@ -753,19 +754,17 @@ class MllamaVisionModel(nn.Module):
         )
         hidden_state = hidden_state.reshape(
             batch_size * num_concurrent_media,
-            num_tiles * (num_patches + num_padding_patches),
+            num_tiles * (num_patches),
             dim,
         )
-        hidden_state = self.global_transformer(
-            hidden_state, attention_mask=attention_mask
-        )[0]
+        hidden_state = self.global_transformer(hidden_state)[0]
         hidden_state = hidden_state.reshape(
             batch_size * num_concurrent_media,
             num_tiles,
-            num_patches + num_padding_patches,
+            num_patches,
             dim,
         )
-        hidden_state = hidden_state[:, :, :slice_index]
+        # hidden_state = hidden_state[:, :, :slice_index]
 
         # adding intermediate layer outputs
         hidden_state = hidden_state.reshape(
@@ -774,10 +773,10 @@ class MllamaVisionModel(nn.Module):
         intermediate_hidden_states = intermediate_hidden_states.reshape(
             batch_size * num_concurrent_media,
             num_tiles,
-            num_patches + num_padding_patches,
+            num_patches,
             -1,
         )
-        intermediate_hidden_states = intermediate_hidden_states[:, :, :slice_index]
+        # intermediate_hidden_states = intermediate_hidden_states[:, :, :slice_index]
         intermediate_hidden_states = intermediate_hidden_states.reshape(
             batch_size, num_concurrent_media, num_tiles, num_patches, -1
         )
